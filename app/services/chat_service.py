@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any, List, Iterator
 from fastapi import HTTPException
 
 from app.services.kiira_client import KiiraAIClient
-from app.utils.stream_parser import parse_stream_response
+from app.utils.stream_parser import extract_media_from_data
 from app.config import DEFAULT_AGENT_NAME, AGENT_LIST
 from app.utils.logger import get_logger
 
@@ -248,6 +248,13 @@ class ChatService:
                 
                 try:
                     json_data = json.loads(line[6:])
+
+                    # 优化: 一次解析同时提取媒体URL和content
+                    parsed_result = extract_media_from_data(json_data)
+                    if parsed_result:
+                        video_url, _ = parsed_result
+                        break
+
                     choices = json_data.get('choices', [])
                     if choices and isinstance(choices, list) and len(choices) > 0:
                         choice = choices[0]
@@ -255,24 +262,18 @@ class ChatService:
                             # 优先从 delta 中获取 content
                             delta = choice.get('delta', {})
                             content = delta.get('content', '') if isinstance(delta, dict) else ''
-                            
+
                             # 如果没有 delta 内容，尝试从 message 中获取
                             if not content:
                                 message = choice.get('message', {})
                                 content = message.get('content', '') if isinstance(message, dict) else ''
-                            
+
                             if content:
                                 full_content += content
                 except json.JSONDecodeError:
                     pass
                 except Exception as e:
                     logger.debug(f"解析响应数据时出错: {e}")
-            
-            # 尝试解析 video_url
-            parsed_url = parse_stream_response(line)
-            if parsed_url:
-                video_url = parsed_url
-                break
         
         # 构建 OpenAI 格式的响应
         response_id = f"chatcmpl-{task_id}"

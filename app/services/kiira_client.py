@@ -14,7 +14,7 @@ from app.config import (
     BASE_URL_SEAART_UPLOADER,
     DEFAULT_AGENT_NAME
 )
-from app.utils.http_client import build_headers, make_request
+from app.utils.http_client import build_headers, make_request, get_session
 from app.utils.file_utils import (
     get_image_data_and_type,
     get_file_extension_from_content_type
@@ -265,14 +265,14 @@ class KiiraAIClient:
         resource_id = str(int(time.time() * 1000))  # 毫秒时间戳作为 resource_id
 
         # 2. 请求预签名 URL
-        logger.info(f"Step 1: 正在请求预签名 URL (Size: {file_size} bytes, Type: {content_type})...")
+        logger.debug(f"Step 1: 正在请求预签名 URL (Size: {file_size} bytes, Type: {content_type})...")
         presign_response = self._get_upload_presign(
             resource_id=resource_id,
             file_name=file_name,
             file_size=file_size,
             content_type=content_type
         )
-        
+
         if not presign_response or 'data' not in presign_response:
             logger.error("预签名请求失败或响应格式错误")
             return None
@@ -281,15 +281,15 @@ class KiiraAIClient:
         pre_signs = presign_data.get("pre_signs", [])
         resource_ret_id = presign_data.get("id")
         upload_url = (pre_signs[0].get("url") if pre_signs and isinstance(pre_signs, list) else None)
-        
+
         if not upload_url:
             logger.error(f"没有拿到预签名 URL，响应: {presign_response}")
             return None
-        
-        logger.info(f"✅ 预签名响应成功, 资源ID {resource_ret_id}")
+
+        logger.debug(f"✅ 预签名响应成功, 资源ID {resource_ret_id}")
 
         # 3. 直传图片到 GCS
-        logger.info("Step 2: 正在直传图片到 GCS...")
+        logger.debug("Step 2: 正在直传图片到 GCS...")
         
         # 检查预签名响应中是否有指定的 headers
         presign_headers = {}
@@ -304,7 +304,8 @@ class KiiraAIClient:
         upload_headers.update(presign_headers)  # 合并预签名指定的 headers
         
         try:
-            put_resp = requests.put(
+            session = get_session()
+            put_resp = session.put(
                 upload_url,
                 headers=upload_headers,
                 data=put_data,
@@ -320,7 +321,7 @@ class KiiraAIClient:
             return None
 
         # 4. 调用 complete 接口获取最终图片地址
-        logger.info(f"Step 3: 正在调用 complete 接口获取最终图片地址...")
+        logger.debug(f"Step 3: 正在调用 complete 接口获取最终图片地址...")
         complete_data = self._upload_complete(resource_ret_id)
 
         if complete_data and complete_data.get("status", {}).get("code") == 10000:
@@ -328,7 +329,7 @@ class KiiraAIClient:
             image_path_ret = image_data.get("path")
             image_url = image_data.get("url")
             if image_url:
-                logger.info(f"✅ Complete 成功，最终 URL: {image_url}")
+                logger.info(f"✅ 资源上传成功: {file_name} ({file_size} bytes)")
                 return {"name": file_name, "size": file_size, "url": image_url, "path": image_path_ret, "id": resource_id}
             else:
                 logger.warning("⚠️ 未在响应中找到图片URL")
@@ -399,7 +400,8 @@ class KiiraAIClient:
         
         try:
             logger.info(f"开始请求流式响应，task_id: {task_id}")
-            response = requests.post(
+            session = get_session()
+            response = session.post(
                 url,
                 headers=headers,
                 json=data,
@@ -408,15 +410,15 @@ class KiiraAIClient:
                 timeout=timeout
             )
             
-            logger.info(f"收到响应，状态码: {response.status_code}")
+            logger.debug(f"收到响应，状态码: {response.status_code}")
             if response.status_code != 200:
                 logger.error(f"流式响应状态码错误: {response.status_code}")
                 logger.error(f"响应内容: {response.text[:500]}")
                 return
-            
+
             response.encoding = 'utf-8'
-            logger.info("开始接收流式数据...")
-            
+            logger.debug("开始接收流式数据...")
+
             line_count = 0
             has_data = False
             for line in response.iter_lines(decode_unicode=True):
@@ -424,7 +426,7 @@ class KiiraAIClient:
                 if line:
                     has_data = True
                     if line_count == 1:
-                        logger.info("✅ 收到第一行数据")
+                        logger.debug("✅ 收到第一行数据")
                     
                     if isinstance(line, bytes):
                         line = line.decode('utf-8')
@@ -434,11 +436,12 @@ class KiiraAIClient:
                         yield line
                 elif line_count == 1:
                     logger.warning("⚠ 第一行是空行，继续等待...")
-            
+
+
             if not has_data:
                 logger.warning("⚠ 警告：没有收到任何数据")
             else:
-                logger.info(f"✅ 流式响应接收完成，共处理 {line_count} 行")
+                logger.debug(f"✅ 流式响应接收完成，共处理 {line_count} 行")
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"stream_chat_completions 网络错误: {e}")
