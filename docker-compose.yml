@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  kiira2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kiira2api
+    ports:
+      - "8999:8999"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8999/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    networks:
+      - kiira2api-network
+
+networks:
+  kiira2api-network:
+    driver: bridge
+
