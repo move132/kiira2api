@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi.responses import StreamingResponse
 from app.models.schemas import ChatCompletionRequest, ChatCompletionResponse
 from app.services.chat_service import ChatService
+from app.services.conversation_store import get_conversation_store
 from app.utils.stream_parser import extract_media_from_data
 from app.utils.logger import get_logger
 from app.api.dependencies import verify_api_key
@@ -54,27 +55,31 @@ async def chat_completions(
         # 将 Pydantic 模型转换为字典
         messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
 
-        # Group ID: 【{group_id}】
-        msg_group_id = None
-        msg_token = None
-        for msg in request.messages:
-            # 这里改成从 assistant 内容中获取 group_id 和 token
-            if getattr(msg, "role", None) == "assistant":
-                content = getattr(msg, "content", "")
-                if isinstance(content, str):
-                    match = re.search(r'\{\s*"group_id"\s*:\s*"([^"]+)"\s*,\s*"token"\s*:\s*"([^"]+)"\s*\}', content)
-                    if match:
-                        msg_group_id = match.group(1)
-                        msg_token = match.group(2)
-                        logger.info(f"获取到历史记录中的 Group ID: {msg_group_id}, Token: {msg_token[-20:]}")
-                        break
-        # 创建聊天服务实例
-        if not msg_group_id:
-            logger.warning(f"未获取到历史记录中的 Group ID, 创建新的聊天服务实例")
-            chat_service = ChatService()
+        # 获取会话存储实例
+        conversation_store = get_conversation_store()
+
+        # 会话管理：使用 conversation_id 替代从 content 中解析
+        conversation_id = request.conversation_id
+        is_new_conversation = False
+
+        if conversation_id:
+            # 尝试从会话存储中恢复会话
+            session = await conversation_store.get(conversation_id)
+            if session:
+                logger.info(f"复用会话: conversation_id={conversation_id}, group_id={session.group_id}")
+                chat_service = ChatService(group_id=session.group_id, token=session.token)
+                # 更新会话活跃时间
+                await conversation_store.touch(conversation_id)
+            else:
+                # 会话不存在或已过期
+                logger.warning(f"会话不存在或已过期: conversation_id={conversation_id}，创建新会话")
+                chat_service = ChatService()
+                is_new_conversation = True
         else:
-            logger.info(f"获取到历史记录中的 Group ID， 直接继续原来的聊天")
-            chat_service = ChatService(group_id=msg_group_id, token=msg_token)
+            # 没有提供 conversation_id，创建新会话
+            logger.info("未提供 conversation_id，创建新会话")
+            chat_service = ChatService()
+            is_new_conversation = True
 
         last_message = request.messages[-1] if request.messages else None
         prompt = (
@@ -97,44 +102,33 @@ async def chat_completions(
             }
         # 如果请求流式响应
         if request.stream:
-            if msg_group_id and msg_token:
-                resources = await chat_service._extract_images_from_messages([last_message]) if last_message else []
-                logger.info(f"复用对话状态 group_id={msg_group_id}, 提取图片资源数量: {len(resources)}")
+            # 执行聊天完成并获取 task_id
+            # 显式传递 agent_name，确保使用用户请求的模型/Agent
+            result = await chat_service.chat_completion(
+                messages=[last_message],
+                model=request.model,
+                agent_name=request.model,
+                stream=True
+            )
 
-                # 直接使用已有的group_id和token
-                chat_service.client.group_id = msg_group_id
-                chat_service.client.token = msg_token
-
-                # 如果有at_account_no缓存则使用,否则查询一次
-                if not chat_service.client.at_account_no:
-                    _, at_account_no = await chat_service.client.get_my_chat_group_list(request.model)
-                else:
-                    at_account_no = chat_service.client.at_account_no
-
-                task_id = await chat_service.client.send_message(
-                    message=prompt,
-                    at_account_no=at_account_no,
-                    resources=resources if resources else None
-                )
-                result = {
-                    "task_id": task_id,
-                    "group_id": msg_group_id,
-                    "token": msg_token
-                }
-            else:
-                # 执行聊天完成并获取 task_id
-                # 显式传递 agent_name，确保使用用户请求的模型/Agent
-                result = await chat_service.chat_completion(
-                    messages=[last_message],
-                    model=request.model,
-                    agent_name=request.model,
-                    stream=True
-                )
             task_id = result.get("task_id")
             group_id = result.get("group_id")
             token = result.get("token")
+
             if not task_id:
                 raise HTTPException(status_code=500, detail="无法获取任务ID")
+
+            # 如果是新会话，创建 conversation_id 并保存到存储
+            if is_new_conversation:
+                session = await conversation_store.create(
+                    agent_name=request.model,
+                    group_id=group_id,
+                    token=token
+                )
+                conversation_id = session.conversation_id
+                logger.info(f"创建新会话: conversation_id={conversation_id}, group_id={group_id}")
+            else:
+                logger.info(f"使用现有会话: conversation_id={conversation_id}")
             
             # 返回流式响应
             async def generate_stream():
@@ -145,28 +139,23 @@ async def chat_completions(
                 media_url = None
                 media_type = None
                 done_sent = False
-                if len(request.messages) == 1:
-                    # 发送group_id
-                    # content = f"""<div style='color: rgb(0, 185, 107);'>Group ID:【{group_id}】</div>
-                    #               <div style='color: rgb(0, 185, 130);'>Token:【{token}】</div>
-                    #             """
-                    content = f"""
-                    ```json
-                    {{"group_id": "{group_id}", "token": "{token}"}}
-                    ```
-                    """
-                    group_id_chunk = {
+
+                # 在第一个 chunk 中返回 conversation_id（如果是新会话）
+                if is_new_conversation:
+                    # 发送包含 conversation_id 的元数据 chunk
+                    meta_chunk = {
                         "id": response_id,
                         "object": "chat.completion.chunk",
                         "created": created,
                         "model": model,
+                        "conversation_id": conversation_id,  # 新增：返回会话ID
                         "choices": [{
                             "index": 0,
-                            "delta": {"content": content},
-                            "finish_reason": "stop"
+                            "delta": {},
+                            "finish_reason": None
                         }]
                     }
-                    yield f"data: {json.dumps(group_id_chunk)}\n\n"
+                    yield f"data: {json.dumps(meta_chunk)}\n\n"
                 try:
                     async for line in chat_service.stream_chat_completion(task_id):
                         if not line or not line.strip():
@@ -316,7 +305,24 @@ async def chat_completions(
                 agent_name=request.model,
                 stream=False
             )
-            
+
+            # 如果是新会话，创建 conversation_id 并保存到存储
+            if is_new_conversation:
+                # 从 chat_service 获取 group_id 和 token
+                group_id = chat_service.client.group_id
+                token = chat_service.client.token
+
+                session = await conversation_store.create(
+                    agent_name=request.model,
+                    group_id=group_id,
+                    token=token
+                )
+                conversation_id = session.conversation_id
+                logger.info(f"创建新会话: conversation_id={conversation_id}, group_id={group_id}")
+
+            # 在响应中添加 conversation_id
+            response_data["conversation_id"] = conversation_id
+
             # 转换为 Pydantic 模型
             return ChatCompletionResponse(**response_data)
     
