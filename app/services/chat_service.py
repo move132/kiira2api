@@ -8,7 +8,7 @@ import os
 from typing import Optional, Dict, Any, List, Iterator
 from fastapi import HTTPException
 
-from app.services.kiira_client import KiiraAIClient
+from app.services.kiira_client import KiiraAIClient, is_agent_name_match
 from app.utils.stream_parser import extract_media_from_data
 from app.config import DEFAULT_AGENT_NAME, AGENT_LIST
 from app.utils.logger import get_logger
@@ -193,7 +193,7 @@ class ChatService:
             响应数据
         """
         # 确保已初始化
-        await self._ensure_initialized(model)
+        await self._ensure_initialized(agent_name=agent_name)
         # 构建提示词
         prompt = self._build_prompt_from_messages(messages)
         if not prompt:
@@ -201,16 +201,28 @@ class ChatService:
         
         # 提取图片资源
         resources = self._extract_images_from_messages(messages)
-        agent_list = self.client.get_agent_list()
-        # 遍历 agent_list 中的每一个 agent，调用 create_chat_group
-        if agent_list and isinstance(agent_list, list):
-            for agent in agent_list:
-                label = agent.get("label", "")
-                # 只处理 label 为 AGENT_LIST 的 agent
-                if label in AGENT_LIST:
-                    account_no = agent.get("account_no")
-                    if account_no:
-                        self.client.create_chat_group(account_no, label)
+
+        # 批量创建配置的agent群组（使用模糊匹配）
+        if AGENT_LIST:
+            agent_list = self.client.get_agent_list()
+            if agent_list and isinstance(agent_list, list):
+                for agent in agent_list:
+                    label = agent.get("label", "") or ""
+                    if not label:
+                        continue
+
+                    # 使用模糊匹配判断当前 label 是否属于配置的 AGENT_LIST
+                    is_configured = any(
+                        is_agent_name_match(label, configured)
+                        for configured in AGENT_LIST
+                    )
+
+                    if is_configured:
+                        account_no = agent.get("account_no")
+                        if account_no:
+                            # create_chat_group 接口期望的是列表
+                            self.client.create_chat_group([account_no], label)
+
         # 发送消息
         task_id = self.client.send_message(
             message=prompt,

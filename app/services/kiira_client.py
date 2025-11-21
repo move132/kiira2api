@@ -3,10 +3,12 @@ Kiira AI 客户端服务
 """
 import uuid
 import time
+import re
+from difflib import SequenceMatcher
 import requests
 from pathlib import Path
 from typing import Optional, Dict, Any, Iterator, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.config import (
     BASE_URL_KIIRA,
@@ -23,15 +25,153 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ============================================================================
+# Agent 名称模糊匹配配置
+# ============================================================================
+# 名称相似度阈值（0~1），低于该值视为不匹配
+# 建议值：0.7 可以容忍约30%的差异（如增加emoji、后缀等）
+AGENT_NAME_SIMILARITY_THRESHOLD = 0.7
+
+# Agent 列表缓存时间（秒），避免频繁请求
+# 仅对默认参数（无分类、无关键词）的调用生效
+AGENT_LIST_CACHE_TTL_SECONDS = 60
+
+
+def normalize_agent_name(name: str) -> str:
+    """
+    标准化 Agent 名称，便于模糊匹配
+
+    处理步骤：
+    1. 去除首尾空格
+    2. 转为小写（忽略大小写差异）
+    3. 移除特殊符号和emoji，仅保留数字、字母和常见中文
+
+    Args:
+        name: 原始Agent名称
+
+    Returns:
+        标准化后的名称（仅包含数字、字母、中文）
+
+    Examples:
+        >>> normalize_agent_name("Nano Banana Pro🔥")
+        'nanobananapro'
+        >>> normalize_agent_name("换装游戏 v2.0")
+        '换装游戏v20'
+    """
+    if not isinstance(name, str):
+        return ""
+    name = name.strip().lower()
+    # 保留数字、字母和常见中文，移除其他字符（空格、标点、emoji等）
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", name)
+
+
+def get_agent_name_similarity(a: str, b: str) -> float:
+    """
+    计算两个 Agent 名称之间的相似度
+
+    算法策略：
+    1. 先对名称进行标准化处理
+    2. 使用 SequenceMatcher 计算基础相似度
+    3. 对"包含关系"进行加权（认为是增加后缀/前缀的情况）
+
+    Args:
+        a: 第一个Agent名称
+        b: 第二个Agent名称
+
+    Returns:
+        相似度分数（0~1），1表示完全相同
+
+    Examples:
+        >>> get_agent_name_similarity("Nano Banana", "nano banana pro")
+        0.9  # 包含关系，高相似度
+        >>> get_agent_name_similarity("Agent A", "Agent B")
+        0.83  # 部分相同（实际值，会根据SequenceMatcher算法计算）
+        >>> get_agent_name_similarity("Agent A", "Agent Z")
+        0.67  # 相似度较低
+    """
+    na = normalize_agent_name(a)
+    nb = normalize_agent_name(b)
+
+    if not na or not nb:
+        return 0.0
+
+    if na == nb:
+        return 1.0
+
+    # 使用 SequenceMatcher 计算基础相似度
+    base_similarity = SequenceMatcher(None, na, nb).ratio()
+
+    # 如果标准化后存在包含关系，认为是非常接近的名称
+    # 例如："nanobananapro" 包含在 "nanobananapromax" 中
+    if na in nb or nb in na:
+        # 提升相似度到至少0.9，但不会低于原始相似度
+        return max(base_similarity, 0.9)
+
+    return base_similarity
+
+
+def is_agent_name_match(
+    a: str,
+    b: str,
+    threshold: float = AGENT_NAME_SIMILARITY_THRESHOLD
+) -> bool:
+    """
+    判断两个 Agent 名称是否"足够相似"以视为匹配
+
+    匹配优先级（从高到低）：
+    1. 完全相等（精确匹配）
+    2. 忽略大小写相等
+    3. 标准化后相似度达到阈值（包含关系会被提升相似度）
+
+    Args:
+        a: 第一个Agent名称
+        b: 第二个Agent名称
+        threshold: 相似度阈值，默认使用全局配置
+
+    Returns:
+        是否匹配
+
+    Examples:
+        >>> is_agent_name_match("Nano Banana Pro🔥", "nano banana pro")
+        True  # 标准化后相同
+        >>> is_agent_name_match("Agent A", "Agent B", threshold=0.7)
+        True  # 相似度约0.83，达到阈值0.7
+        >>> is_agent_name_match("Agent A", "Agent Z", threshold=0.7)
+        False  # 相似度约0.67，低于阈值0.7
+    """
+    if not a or not b:
+        return False
+
+    # 优先级1：完全相等
+    if a == b:
+        return True
+
+    # 优先级2：忽略大小写相等
+    if a.lower() == b.lower():
+        return True
+
+    # 优先级3：基于相似度判断
+    similarity = get_agent_name_similarity(a, b)
+    return similarity >= threshold
+
 @dataclass
 class KiiraAIClient:
     """Kiira AI API 客户端类"""
-    
+
     device_id: str
     token: Optional[str] = None
     group_id: Optional[str] = None
     at_account_no: Optional[str] = None
     user_name: Optional[str] = None
+
+    # Agent 列表缓存，仅对默认参数调用生效，用于减少频繁接口访问
+    # 使用 field(init=False, repr=False) 避免出现在构造函数和日志中
+    _agent_list_cache: Optional[List[Dict[str, Any]]] = field(
+        default=None, init=False, repr=False
+    )
+    _agent_list_cache_time: Optional[float] = field(
+        default=None, init=False, repr=False
+    )
     
     def __post_init__(self):
         """初始化后自动生成设备ID（如果未提供）"""
@@ -70,59 +210,198 @@ class KiiraAIClient:
         return None, None
     
     def get_my_chat_group_list(self, agent_name: str = DEFAULT_AGENT_NAME) -> Optional[tuple[str, str]]:
-        """获取当前账户的聊天群组列表，查找指定昵称的群组"""
+        """
+        获取当前账户的聊天群组列表，查找指定Agent的群组
+
+        支持智能匹配策略（三级回退）：
+        1. 精确匹配：在现有群组中查找完全相同的nickname
+        2. 模糊匹配：在现有群组中查找相似度达标的nickname
+        3. 创建群组：从agent列表中查找相似Agent并创建新群组
+
+        Args:
+            agent_name: 目标Agent名称
+
+        Returns:
+            (group_id, at_account_no) 元组，失败返回 None
+        """
         url = f'{BASE_URL_KIIRA}/api/v1/my-chat-group-list'
         headers = build_headers(device_id=self.device_id, token=self.token, accept_language='eh')
         data = {"page": 1, "page_size": 999}
-        response_data = make_request('POST', url, device_id=self.device_id, token=self.token, headers=headers, json_data=data)
+        response_data = make_request(
+            'POST', url,
+            device_id=self.device_id,
+            token=self.token,
+            headers=headers,
+            json_data=data
+        )
 
-        # logger.info(f"获取当前账户的聊天群组列表，查找指定昵称的群组，响应数据: {response_data}")
         if not response_data or 'data' not in response_data:
             logger.warning("未在响应中找到群组数据")
             return None
-        
+
         items = response_data.get('data', {}).get('items', [])
+
+        # ========================================================================
+        # 策略1：精确匹配（优先级最高，保持向后兼容）
+        # ========================================================================
         for item in items:
             user_list = item.get('user_list', [])
             for user in user_list:
                 if user.get('nickname') == agent_name:
                     group_id = item.get('id')
                     at_account_no = user.get('account_no')
-                    logger.info(f"✅ 找到群组ID: {group_id}, at_account_no: {at_account_no}")
+                    logger.info(
+                        f"✅ 找到群组 (精确匹配): "
+                        f"group_id={group_id}, "
+                        f"at_account_no={at_account_no}, "
+                        f"nickname='{agent_name}'"
+                    )
                     self.group_id = group_id
                     self.at_account_no = at_account_no
                     return group_id, at_account_no
-        # 如果未找到，则获取 agent 列表，并创建聊天群组
-        logger.warning(f"未在 user_list 中找到 '{agent_name}'，正在尝试在agent 列表中获取 '{agent_name}'，并创建聊天群组")
+
+        # ========================================================================
+        # 策略2：模糊匹配现有群组
+        # ========================================================================
+        best_match = None
+        best_score = 0.0
+
+        for item in items:
+            user_list = item.get('user_list', [])
+            for user in user_list:
+                nickname = user.get('nickname') or ""
+                if not nickname:
+                    continue
+
+                similarity = get_agent_name_similarity(agent_name, nickname)
+                if similarity > best_score:
+                    best_score = similarity
+                    best_match = (item, user, nickname)
+
+        if best_match and best_score >= AGENT_NAME_SIMILARITY_THRESHOLD:
+            item, user, nickname = best_match
+            group_id = item.get('id')
+            at_account_no = user.get('account_no')
+            logger.info(
+                f"✅ 找到群组 (模糊匹配): "
+                f"group_id={group_id}, "
+                f"at_account_no={at_account_no}, "
+                f"target='{agent_name}', "
+                f"matched='{nickname}', "
+                f"similarity={best_score:.2f}"
+            )
+            self.group_id = group_id
+            self.at_account_no = at_account_no
+            return group_id, at_account_no
+
+        # ========================================================================
+        # 策略3：从agent列表中查找并创建新群组
+        # ========================================================================
+        logger.warning(
+            f"未在现有群组中找到 '{agent_name}'，"
+            f"正在尝试从agent列表中查找并创建新群组"
+        )
+
         agent_list = self.get_agent_list()
-        # 遍历 agent_list 中的每一个 agent，调用 create_chat_group
-        if agent_list and isinstance(agent_list, list):
-            for agent in agent_list:
-                label = agent.get("label", "")
-                if label in [agent_name]:
-                    account_no_base = agent.get("account_no")
-                    if account_no_base:
-                        group_info = self.create_chat_group([account_no_base], label)
-                        group_id = group_info.get("id")
-                        at_account_no = group_info.get("user_list", [])[0].get("account_no")
-                        self.group_id = group_id
-                        self.at_account_no = at_account_no
-                        return group_id, at_account_no
-        # 发送消息
-        logger.warning(f"未找到 '{agent_name}'")
-        return None, None
+        if not agent_list or not isinstance(agent_list, list):
+            logger.error("获取agent列表失败，无法创建群组")
+            return None
+
+        # 在agent列表中查找最佳匹配
+        best_agent = None
+        best_agent_score = 0.0
+
+        for agent in agent_list:
+            label = agent.get("label", "") or ""
+            if not label:
+                continue
+
+            similarity = get_agent_name_similarity(agent_name, label)
+            if similarity > best_agent_score:
+                best_agent_score = similarity
+                best_agent = agent
+
+        if best_agent and best_agent_score >= AGENT_NAME_SIMILARITY_THRESHOLD:
+            label = best_agent.get("label", "")
+            account_no_base = best_agent.get("account_no")
+
+            if account_no_base:
+                logger.info(
+                    f"📝 准备创建群组: "
+                    f"target='{agent_name}', "
+                    f"matched_label='{label}', "
+                    f"similarity={best_agent_score:.2f}"
+                )
+
+                group_info = self.create_chat_group([account_no_base], label)
+                if group_info:
+                    group_id = group_info.get("id")
+                    user_list = group_info.get("user_list") or []
+
+                    # 安全地获取 at_account_no
+                    if user_list and isinstance(user_list, list) and len(user_list) > 0:
+                        at_account_no = user_list[0].get("account_no") or account_no_base
+                    else:
+                        at_account_no = account_no_base
+
+                    logger.info(
+                        f"✅ 群组创建成功: "
+                        f"group_id={group_id}, "
+                        f"at_account_no={at_account_no}"
+                    )
+                    self.group_id = group_id
+                    self.at_account_no = at_account_no
+                    return group_id, at_account_no
+                else:
+                    logger.error(f"创建群组失败: label='{label}'")
+            else:
+                logger.error(f"Agent缺少account_no: {best_agent}")
+
+        # 所有策略都失败
+        logger.warning(
+            f"❌ 未找到可用的Agent来匹配 '{agent_name}'，请检查配置或稍后重试"
+        )
+        return None
     
-    def get_agent_list(self, category_ids: list[str] = [], keyword: str = "") -> Optional[Dict[str, Any]]:
+    def get_agent_list(
+        self,
+        category_ids: Optional[list[str]] = None,
+        keyword: str = ""
+    ) -> Optional[List[Dict[str, Any]]]:
         """
         获取所有 agent(代理) 列表
 
+        支持缓存机制：
+        - 仅对默认参数（无分类、无关键词）的调用启用缓存
+        - 缓存有效期由 AGENT_LIST_CACHE_TTL_SECONDS 控制
+        - 避免频繁请求API，提高性能
+
         Args:
-            category_ids (list[str], optional): 分类ID列表，默认 []
-            keyword (str, optional): 搜索关键词, 默认空字符串
+            category_ids (Optional[list[str]], optional): 分类ID列表，默认 None
+            keyword (str, optional): 搜索关键词，默认空字符串
 
         Returns:
-            Optional[Dict[str, Any]]: 响应数据
+            Optional[List[Dict[str, Any]]]: Agent列表（仅包含部分字段）
         """
+        # 处理可变默认值
+        if category_ids is None:
+            category_ids = []
+
+        # 仅对默认参数调用使用缓存，确保语义明确
+        use_cache = not category_ids and not keyword
+        now = time.time()
+
+        # 检查缓存是否有效
+        if use_cache and self._agent_list_cache is not None and self._agent_list_cache_time:
+            cache_age = now - self._agent_list_cache_time
+            if cache_age < AGENT_LIST_CACHE_TTL_SECONDS:
+                logger.debug(
+                    f"命中agent列表缓存 (已缓存 {cache_age:.1f}秒, "
+                    f"TTL {AGENT_LIST_CACHE_TTL_SECONDS}秒)"
+                )
+                return self._agent_list_cache
+
+        # 缓存未命中或已过期，发起请求
         url = f"{BASE_URL_KIIRA}/api/v1/agent-list"
         headers = build_headers(
             device_id=self.device_id,
@@ -130,11 +409,12 @@ class KiiraAIClient:
             accept_language='zh,zh-CN;q=0.9,en;q=0.8,ja;q=0.7',
             referer=f'{BASE_URL_KIIRA}/search'
         )
-        # curl 的 body 是 {"category_ids":[],"keyword":""}
+
         data = {
             "category_ids": category_ids,
             "keyword": keyword
         }
+
         response_data = make_request(
             'POST',
             url,
@@ -143,8 +423,9 @@ class KiiraAIClient:
             headers=headers,
             json_data=data
         )
+
         if response_data and 'data' in response_data:
-            # 只返回指定字段
+            # 提取关键字段，减少内存占用
             items = response_data['data']['items']
             filtered_items = []
             for item in items:
@@ -154,8 +435,15 @@ class KiiraAIClient:
                     "account_no": item.get("account_no"),
                     "description": item.get("description"),
                 })
-            # logger.info(f"获取 agent 列表成功，响应: {filtered_items}")
+
+            # 更新缓存（仅默认参数场景）
+            if use_cache:
+                self._agent_list_cache = filtered_items
+                self._agent_list_cache_time = now
+                logger.debug(f"已缓存agent列表 (共 {len(filtered_items)} 个agent)")
+
             return filtered_items
+
         logger.error(f"获取 agent 列表失败，响应: {response_data}")
         return None
 
