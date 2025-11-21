@@ -79,11 +79,20 @@ class InMemoryConversationStore(ConversationStore):
         self._lock = asyncio.Lock()
         self._ttl = timedelta(hours=ttl_hours)
 
+    def _now(self) -> datetime:
+        """
+        获取当前时间
+
+        统一时间获取逻辑，便于测试和未来改为时区感知时间。
+        """
+        return datetime.now()
+
     async def get(self, conversation_id: str) -> Optional[ConversationSession]:
         """
         获取会话
 
         自动清理过期会话，遵循 KISS 原则。
+        会话只有在业务层显式调用 touch() 时才续期，get() 只用于读取和过期判断。
         """
         async with self._lock:
             session = self._sessions.get(conversation_id)
@@ -92,7 +101,7 @@ class InMemoryConversationStore(ConversationStore):
                 return None
 
             # 检查是否过期
-            if datetime.now() - session.last_active_at > self._ttl:
+            if self._now() - session.last_active_at > self._ttl:
                 del self._sessions[conversation_id]
                 return None
 
@@ -111,7 +120,7 @@ class InMemoryConversationStore(ConversationStore):
         """
         async with self._lock:
             conversation_id = str(uuid.uuid4())
-            now = datetime.now()
+            now = self._now()
 
             session = ConversationSession(
                 conversation_id=conversation_id,
@@ -134,7 +143,7 @@ class InMemoryConversationStore(ConversationStore):
         async with self._lock:
             session = self._sessions.get(conversation_id)
             if session:
-                session.last_active_at = datetime.now()
+                session.last_active_at = self._now()
 
     async def delete(self, conversation_id: str) -> None:
         """删除会话"""
@@ -149,7 +158,7 @@ class InMemoryConversationStore(ConversationStore):
             清理的会话数量
         """
         async with self._lock:
-            now = datetime.now()
+            now = self._now()
             expired_ids = [
                 conv_id
                 for conv_id, session in self._sessions.items()
@@ -166,12 +175,14 @@ class InMemoryConversationStore(ConversationStore):
         获取存储统计信息
 
         用于监控和调试。
+        注意：此方法返回近似统计，未加锁以避免性能开销。
         """
+        now = self._now()
         return {
             "total_sessions": len(self._sessions),
             "active_sessions": sum(
                 1 for s in self._sessions.values()
-                if datetime.now() - s.last_active_at <= self._ttl
+                if now - s.last_active_at <= self._ttl
             ),
         }
 

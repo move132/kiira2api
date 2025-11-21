@@ -1,7 +1,6 @@
 """
 聊天相关 API 路由
 """
-import re
 import json
 from uuid import uuid4
 import time
@@ -66,10 +65,19 @@ async def chat_completions(
             # 尝试从会话存储中恢复会话
             session = await conversation_store.get(conversation_id)
             if session:
-                logger.info(f"复用会话: conversation_id={conversation_id}, group_id={session.group_id}")
-                chat_service = ChatService(group_id=session.group_id, token=session.token)
-                # 更新会话活跃时间
-                await conversation_store.touch(conversation_id)
+                # 校验 model 一致性：确保同一会话不会跨模型使用
+                if session.agent_name != request.model:
+                    logger.warning(
+                        f"会话 {conversation_id} 的 model 不匹配: "
+                        f"会话绑定={session.agent_name}, 请求={request.model}，创建新会话"
+                    )
+                    chat_service = ChatService()
+                    is_new_conversation = True
+                else:
+                    logger.info(f"复用会话: conversation_id={conversation_id}, group_id={session.group_id}")
+                    chat_service = ChatService(group_id=session.group_id, token=session.token)
+                    # 更新会话活跃时间
+                    await conversation_store.touch(conversation_id)
             else:
                 # 会话不存在或已过期
                 logger.warning(f"会话不存在或已过期: conversation_id={conversation_id}，创建新会话")
@@ -140,22 +148,20 @@ async def chat_completions(
                 media_type = None
                 done_sent = False
 
-                # 在第一个 chunk 中返回 conversation_id（如果是新会话）
-                if is_new_conversation:
-                    # 发送包含 conversation_id 的元数据 chunk
-                    meta_chunk = {
-                        "id": response_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "conversation_id": conversation_id,  # 新增：返回会话ID
-                        "choices": [{
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": None
-                        }]
-                    }
-                    yield f"data: {json.dumps(meta_chunk)}\n\n"
+                # 在第一个 chunk 中始终返回 conversation_id（统一前端处理逻辑）
+                meta_chunk = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "conversation_id": conversation_id,  # 始终返回会话ID，便于前端统一处理
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(meta_chunk)}\n\n"
                 try:
                     async for line in chat_service.stream_chat_completion(task_id):
                         if not line or not line.strip():
@@ -320,7 +326,7 @@ async def chat_completions(
                 conversation_id = session.conversation_id
                 logger.info(f"创建新会话: conversation_id={conversation_id}, group_id={group_id}")
 
-            # 在响应中添加 conversation_id
+            # 在响应中添加 conversation_id（确保响应中始终包含会话ID）
             response_data["conversation_id"] = conversation_id
 
             # 转换为 Pydantic 模型
