@@ -182,15 +182,15 @@ class ChatService:
     ) -> Dict[str, Any]:
         """
         执行聊天完成
-        
+
         Args:
             messages: 消息列表
-            model: 模型名称（暂时未使用）
-            model_name: 模型名称
+            model: 模型名称，用于响应中的 model 字段
+            agent_name: Agent 名称，用于选择聊天群组
             stream: 是否流式返回
-            
+
         Returns:
-            响应数据
+            响应数据（流式返回 task_id 等信息，非流式返回完整响应）
         """
         # 确保已初始化
         await self._ensure_initialized(agent_name=agent_name)
@@ -238,77 +238,115 @@ class ChatService:
             return {"task_id": task_id, "stream": True, "group_id": self.client.group_id, "token": self.client.token}
         else:
             # 非流式响应：收集所有流式数据后返回
-            return await self._collect_stream_response(task_id)
+            return await self._collect_stream_response(task_id, model=model)
     
-    async def _collect_stream_response(self, task_id: str) -> Dict[str, Any]:
+    async def _collect_stream_response(self, task_id: str, model: str = "") -> Dict[str, Any]:
         """
         收集流式响应并转换为完整响应
-        
+
         Args:
             task_id: 任务ID
-            
+            model: 模型名称，用于响应中的 model 字段
+
         Returns:
             完整的响应数据
         """
         full_content = ""
-        video_url = None
-        
+        media_url = None
+        media_type = None
+        sa_resources: List[Dict[str, Any]] = []
+
         for line in self.client.stream_chat_completions(task_id):
-            if line.startswith("data: "):
-                if line[6:].strip() == "[DONE]":
-                    break
-                
-                try:
-                    json_data = json.loads(line[6:])
+            # 只处理 SSE data 行，其它行直接跳过
+            if not line or not line.startswith("data: "):
+                continue
 
-                    # 优化: 一次解析同时提取媒体URL和content
-                    parsed_result = extract_media_from_data(json_data)
-                    if parsed_result:
-                        video_url, _ = parsed_result
-                        break
+            json_str = line[6:].strip()
+            # 处理结束标记
+            if not json_str or json_str == "[DONE]":
+                break
 
-                    choices = json_data.get('choices', [])
-                    if choices and isinstance(choices, list) and len(choices) > 0:
-                        choice = choices[0]
-                        if isinstance(choice, dict):
-                            # 优先从 delta 中获取 content
-                            delta = choice.get('delta', {})
-                            content = delta.get('content', '') if isinstance(delta, dict) else ''
+            try:
+                json_data = json.loads(json_str)
 
-                            # 如果没有 delta 内容，尝试从 message 中获取
-                            if not content:
-                                message = choice.get('message', {})
-                                content = message.get('content', '') if isinstance(message, dict) else ''
+                # 提取媒体资源（图片/视频）
+                parsed_result = extract_media_from_data(json_data)
+                if parsed_result:
+                    parsed_url, parsed_type = parsed_result
+                    media_url = parsed_url
+                    media_type = parsed_type
 
-                            if content:
-                                full_content += content
-                except json.JSONDecodeError:
-                    pass
-                except Exception as e:
-                    logger.debug(f"解析响应数据时出错: {e}")
-        
+                    # 保留上游返回的 sa_resources 结构，方便调用方自定义渲染
+                    choices_data = json_data.get("choices", [])
+                    if choices_data and isinstance(choices_data, list):
+                        first_choice = choices_data[0]
+                        if isinstance(first_choice, dict):
+                            resources = first_choice.get("sa_resources")
+                            if isinstance(resources, list):
+                                sa_resources.extend(resources)
+
+                # 提取文本内容（优先从 delta，其次从 message）
+                choices = json_data.get("choices", [])
+                if choices and isinstance(choices, list):
+                    choice = choices[0]
+                    if isinstance(choice, dict):
+                        delta = choice.get("delta", {})
+                        content = delta.get("content", "") if isinstance(delta, dict) else ""
+
+                        if not content:
+                            message = choice.get("message", {})
+                            content = message.get("content", "") if isinstance(message, dict) else ""
+
+                        if content:
+                            full_content += content
+            except json.JSONDecodeError:
+                # 记录解析失败的行，方便排查问题
+                logger.debug(f"JSON 解析失败, task_id={task_id}, line={json_str[:200]}")
+                continue
+            except Exception as e:
+                logger.error(f"解析响应数据异常, task_id={task_id}: {e}", exc_info=True)
+                continue
+
+        # 结果有效性校验：既没有文本也没有媒体时认为是异常
+        if not full_content and not sa_resources and not media_url:
+            logger.error(f"流式响应为空, task_id={task_id}")
+            raise HTTPException(status_code=500, detail="流式响应为空或解析失败")
+
+        # 在文本末尾追加媒体 Markdown，与流式模式保持一致
+        if media_url:
+            if media_type == "image":
+                full_content += f"\n\n![Generated Image]({media_url})\n\n"
+            elif media_type == "video":
+                full_content += f"\n\n生成视频完成.\n[点击下载视频]({media_url})\n\n"
+            else:
+                full_content += f"\n\n{media_url}\n\n"
+
         # 构建 OpenAI 格式的响应
         response_id = f"chatcmpl-{task_id}"
         created = int(time.time())
-        
+
+        message_payload: Dict[str, Any] = {
+            "role": "assistant",
+            "content": full_content
+        }
+
+        # 添加结构化媒体字段，便于前端自定义渲染
+        if sa_resources:
+            message_payload["sa_resources"] = sa_resources
+
         choices = [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": full_content
-            },
+            "message": message_payload,
             "finish_reason": "stop"
         }]
-        
-        # 如果有视频URL，添加到响应中
-        if video_url:
-            choices[0]["message"]["video_url"] = video_url
-        
+
+        response_model = model or "sora-2"
+
         return {
             "id": response_id,
             "object": "chat.completion",
             "created": created,
-            "model": "sora-2",
+            "model": response_model,
             "choices": choices,
             "usage": {
                 "prompt_tokens": len(full_content.split()) if full_content else 0,
