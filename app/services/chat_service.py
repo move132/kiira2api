@@ -81,6 +81,12 @@ class ChatService:
                     status_code=404,
                     detail=f"无法找到指定的Agent群组: {agent_name}"
                 )
+
+        # 兜底：确保 at_account_no 已设置（复用会话时可能缺失）
+        if not self.client.at_account_no:
+            logger.debug(f"at_account_no 未设置，尝试获取 (agent_name={agent_name})")
+            await self.client.get_my_chat_group_list(agent_name=agent_name)
+
         self.save_account_info()
         self._initialized = True
     
