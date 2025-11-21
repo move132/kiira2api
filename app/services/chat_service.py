@@ -277,13 +277,28 @@ class ChatService:
                     media_type = parsed_type
 
                     # 保留上游返回的 sa_resources 结构，方便调用方自定义渲染
+                    # 兼容 sa_resources 在 choice 层级和 delta 层级的两种情况
                     choices_data = json_data.get("choices", [])
                     if choices_data and isinstance(choices_data, list):
                         first_choice = choices_data[0]
                         if isinstance(first_choice, dict):
-                            resources = first_choice.get("sa_resources")
-                            if isinstance(resources, list):
-                                sa_resources.extend(resources)
+                            collected_resources: List[Dict[str, Any]] = []
+
+                            # 1. 收集 choice 层级的 sa_resources
+                            top_level_resources = first_choice.get("sa_resources")
+                            if isinstance(top_level_resources, list):
+                                collected_resources.extend(top_level_resources)
+
+                            # 2. 收集 delta 层级的 sa_resources
+                            delta = first_choice.get("delta")
+                            if isinstance(delta, dict):
+                                delta_resources = delta.get("sa_resources")
+                                if isinstance(delta_resources, list):
+                                    collected_resources.extend(delta_resources)
+
+                            # 3. 合并到总资源列表
+                            if collected_resources:
+                                sa_resources.extend(collected_resources)
 
                 # 提取文本内容（优先从 delta，其次从 message）
                 choices = json_data.get("choices", [])
