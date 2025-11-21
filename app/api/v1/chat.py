@@ -13,6 +13,7 @@ from app.services.chat_service import ChatService
 from app.utils.stream_parser import extract_media_from_data
 from app.utils.logger import get_logger
 from app.api.dependencies import verify_api_key
+from app.config import AGENT_LIST
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["chat"])
@@ -27,6 +28,29 @@ async def chat_completions(
     参考 temp.py 中的运行示例实现实际业务逻辑。
     """
     try:
+        # 验证 model 参数的合法性
+        # 确保 model 非空且在允许的 Agent 列表中
+        if not request.model or not request.model.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="model 参数不能为空"
+            )
+
+        # 使用模糊匹配验证 model 是否在 AGENT_LIST 中
+        # 这样可以容忍一些大小写、空格、emoji 等差异
+        from app.services.kiira_client import is_agent_name_match
+        if AGENT_LIST and not any(
+            is_agent_name_match(request.model, agent)
+            for agent in AGENT_LIST
+        ):
+            logger.warning(
+                f"请求的模型 '{request.model}' 不在允许列表中，"
+                f"允许的模型: {AGENT_LIST}"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"未知模型: {request.model}，请使用 /v1/models 查看可用模型列表"
+            )
         # 将 Pydantic 模型转换为字典
         messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
 
@@ -99,9 +123,11 @@ async def chat_completions(
                 }
             else:
                 # 执行聊天完成并获取 task_id
+                # 显式传递 agent_name，确保使用用户请求的模型/Agent
                 result = await chat_service.chat_completion(
                     messages=[last_message],
                     model=request.model,
+                    agent_name=request.model,
                     stream=True
                 )
             task_id = result.get("task_id")
@@ -283,9 +309,11 @@ async def chat_completions(
             )
         else:
             # 非流式响应
+            # 显式传递 agent_name，确保使用用户请求的模型/Agent
             response_data = await chat_service.chat_completion(
                 messages=messages,
                 model=request.model,
+                agent_name=request.model,
                 stream=False
             )
             

@@ -177,7 +177,7 @@ class ChatService:
         self,
         messages: List[Any],
         model: str = "",
-        agent_name: str = DEFAULT_AGENT_NAME,
+        agent_name: Optional[str] = None,
         stream: bool = False
     ) -> Dict[str, Any]:
         """
@@ -186,14 +186,32 @@ class ChatService:
         Args:
             messages: 消息列表
             model: 模型名称，用于响应中的 model 字段
-            agent_name: Agent 名称，用于选择聊天群组
+            agent_name: Agent 名称，用于选择聊天群组。
+                       如果未指定，将使用 model 参数；
+                       如果 model 也为空，则使用默认配置 DEFAULT_AGENT_NAME
             stream: 是否流式返回
 
         Returns:
             响应数据（流式返回 task_id 等信息，非流式返回完整响应）
         """
-        # 确保已初始化
-        await self._ensure_initialized(agent_name=agent_name)
+        # 确保已初始化：优先使用调用方传入的 agent_name，其次使用 model，最后回退到默认配置
+        # 这样设计符合 KISS 原则：简单直观的参数优先级
+        # 对空白字符串做显式处理，避免隐式回退导致的行为差异
+        name_candidates = [agent_name, model, DEFAULT_AGENT_NAME]
+        effective_agent_name = DEFAULT_AGENT_NAME
+        for candidate in name_candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                effective_agent_name = candidate.strip()
+                break
+
+        # 记录调试日志，便于问题排查
+        logger.debug(
+            f"chat_completion: model='{model}', "
+            f"agent_name_param='{agent_name}', "
+            f"effective_agent_name='{effective_agent_name}'"
+        )
+
+        await self._ensure_initialized(agent_name=effective_agent_name)
         # 构建提示词
         prompt = self._build_prompt_from_messages(messages)
         if not prompt:
