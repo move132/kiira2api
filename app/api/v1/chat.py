@@ -12,6 +12,10 @@ from app.services.chat_service import ChatService
 from app.services.conversation_store import get_conversation_store
 from app.utils.stream_parser import extract_media_from_data
 from app.utils.logger import get_logger
+from app.utils.conversation import (
+    extract_conversation_id_from_messages,
+    inject_conversation_id_into_response,
+)
 from app.api.dependencies import verify_api_key
 from app.config import AGENT_LIST
 
@@ -51,14 +55,27 @@ async def chat_completions(
                 status_code=400,
                 detail=f"未知模型: {request.model}，请使用 /v1/models 查看可用模型列表"
             )
-        # 将 Pydantic 模型转换为字典
-        messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+
+        # 从消息内容中尝试解析 conversation_id（仅在未显式提供时）
+        extracted_conversation_id: Optional[str] = None
+        cleaned_messages = request.messages
+
+        if not request.conversation_id and request.messages:
+            # 尝试从消息中解析会话 ID
+            extracted_conversation_id, cleaned_messages = extract_conversation_id_from_messages(
+                request.messages
+            )
+            if extracted_conversation_id:
+                logger.info(f"从消息中解析到会话 ID: {extracted_conversation_id}")
+
+        # 将 Pydantic 模型转换为字典（使用清洗后的消息内容）
+        messages = [{"role": msg.role, "content": msg.content} for msg in cleaned_messages]
 
         # 获取会话存储实例
         conversation_store = get_conversation_store()
 
-        # 会话管理：使用 conversation_id 替代从 content 中解析
-        conversation_id = request.conversation_id
+        # 会话管理：优先使用显式传入的 conversation_id，其次使用消息中解析出的 ID
+        conversation_id = request.conversation_id or extracted_conversation_id
         is_new_conversation = False
 
         if conversation_id:
@@ -89,7 +106,7 @@ async def chat_completions(
             chat_service = ChatService()
             is_new_conversation = True
 
-        last_message = request.messages[-1] if request.messages else None
+        last_message = cleaned_messages[-1] if cleaned_messages else None
         prompt = (
             last_message.content
             if last_message and hasattr(last_message, "content") and isinstance(last_message.content, str)
@@ -169,42 +186,38 @@ async def chat_completions(
                         # print(line)
                         # 处理 [DONE] 标记
                         if line.startswith("data: ") and line[6:].strip() == "[DONE]":
-                            # 如果有视频URL，发送一个包含视频URL的最终块
+                            # 构建最终内容（包含媒体 URL 和会话 ID）
+                            content_suffix = ""
+
+                            # 如果有媒体 URL，添加媒体相关内容
                             if media_url:
-                                final_chunk = {
-                                    "id": response_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {
-                                            "content":
-                                                f"\n\n![Generated Image]({media_url})\n\n" if media_type == "image"
-                                                else (
-                                                    f"生成视频完成.\n[点击下载视频]({media_url})" if media_type == "video"
-                                                    else f"\n\n{media_url}\n\n"
-                                                )
-                                        },
-                                        "finish_reason": "stop"
-                                    }]
-                                }
-                                yield f"data: {json.dumps(final_chunk)}\n\n"
-                            else:
-                                # 发送一个带有 finish_reason 的最终块
-                                final_chunk = {
-                                    "id": response_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {},
-                                        "finish_reason": "stop"
-                                    }]
-                                }
-                                yield f"data: {json.dumps(final_chunk)}\n\n"
-                            
+                                if media_type == "image":
+                                    content_suffix = f"\n\n![Generated Image]({media_url})\n\n"
+                                elif media_type == "video":
+                                    content_suffix = f"生成视频完成.\n[点击下载视频]({media_url})"
+                                else:
+                                    content_suffix = f"\n\n{media_url}\n\n"
+
+                            # 自动注入会话 ID 标记，实现自动上下文传递
+                            if conversation_id:
+                                tag = f"\n\n[CONVERSATION_ID:{conversation_id}]"
+                                content_suffix = (content_suffix.rstrip() if content_suffix else "") + tag
+
+                            # 构建最终块
+                            delta = {"content": content_suffix} if content_suffix else {}
+                            final_chunk = {
+                                "id": response_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": delta,
+                                    "finish_reason": "stop"
+                                }]
+                            }
+                            yield f"data: {json.dumps(final_chunk)}\n\n"
+
                             # 发送结束标记
                             yield "data: [DONE]\n\n"
                             done_sent = True
@@ -328,6 +341,9 @@ async def chat_completions(
 
             # 在响应中添加 conversation_id（确保响应中始终包含会话ID）
             response_data["conversation_id"] = conversation_id
+
+            # 自动注入会话 ID 到响应内容中，实现自动上下文传递
+            inject_conversation_id_into_response(response_data, conversation_id)
 
             # 转换为 Pydantic 模型
             return ChatCompletionResponse(**response_data)
