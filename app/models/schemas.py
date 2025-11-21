@@ -18,6 +18,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = 1.0
     max_tokens: Optional[int] = None
     stream: Optional[bool] = False
+    conversation_id: Optional[str] = None  # 会话ID，用于保持上下文连续性
 
 
 class ChatCompletionResponse(BaseModel):
@@ -28,6 +29,7 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: List[Dict[str, Any]]
     usage: Optional[Dict[str, int]] = None
+    conversation_id: Optional[str] = None  # 会话ID，用于后续请求保持上下文
 
 
 class ModelInfo(BaseModel):

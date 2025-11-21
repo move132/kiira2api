@@ -50,6 +50,12 @@ async def lifespan(app: FastAPI):
     print(project_logo_str)
     print(f"{GREEN}{'=' * 50}{RESET}")
     yield
+    # 关闭时执行
+    logger.info("🛑 正在关闭应用...")
+    from app.utils.http_client import close_async_client
+    await close_async_client()
+    logger.info("✅ 异步HTTP客户端已关闭")
+    logger.info("✅ 应用关闭完成")
 
 app = FastAPI(title="Kiira2API", version="1.0.0", lifespan=lifespan)
 
