@@ -29,6 +29,14 @@ _session: Optional[requests.Session] = None
 # 默认超时配置: (连接超时, 读取超时) 秒
 DEFAULT_TIMEOUT: Tuple[int, int] = (3, 15)
 
+# 启动时警告
+if not HTTPX_AVAILABLE:
+    logger.warning(
+        "⚠️  httpx 未安装，异步HTTP功能不可用。\n"
+        "   当前使用同步 requests 库，高并发性能受限。\n"
+        "   建议安装：uv sync 或 pip install httpx>=0.27.0"
+    )
+
 
 def build_headers(
     device_id: str,
@@ -133,6 +141,9 @@ async def close_async_client():
     关闭全局异步客户端
     应在应用关闭时调用，释放资源
     """
+    if not HTTPX_AVAILABLE:
+        return  # httpx 未安装，无需关闭
+
     global _async_client
     if _async_client is not None and not _async_client.is_closed:
         await _async_client.aclose()
