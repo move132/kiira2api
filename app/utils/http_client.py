@@ -3,10 +3,17 @@ HTTP 客户端工具函数
 提供异步和同步两种HTTP客户端实现，优先使用异步以提升高并发性能
 """
 import json
-import httpx
 import requests
 from typing import Optional, Dict, Any, Tuple, AsyncIterator
 from contextlib import asynccontextmanager
+
+# 尝试导入 httpx，如果不可用则使用同步方案
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
+    httpx = None
 
 from app.config import BASE_URL_KIIRA
 from app.utils.logger import get_logger
@@ -14,7 +21,7 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # 全局异步客户端单例
-_async_client: Optional[httpx.AsyncClient] = None
+_async_client: Optional["httpx.AsyncClient"] = None if HTTPX_AVAILABLE else None
 
 # 全局同步Session单例（向后兼容）
 _session: Optional[requests.Session] = None
@@ -73,7 +80,7 @@ def build_headers(
     return headers
 
 
-async def get_async_client() -> httpx.AsyncClient:
+async def get_async_client() -> "httpx.AsyncClient":
     """
     获取全局异步HTTP客户端单例
     使用连接池复用TCP连接，大幅提升高并发性能
@@ -85,7 +92,18 @@ async def get_async_client() -> httpx.AsyncClient:
 
     Returns:
         httpx.AsyncClient实例
+
+    Raises:
+        ImportError: 如果 httpx 未安装
     """
+    if not HTTPX_AVAILABLE:
+        logger.error("httpx 未安装！请运行: uv sync 或 pip install httpx>=0.27.0")
+        raise ImportError(
+            "httpx 未安装。异步HTTP客户端需要 httpx 库。\n"
+            "请安装：uv sync 或 pip install httpx>=0.27.0\n"
+            "或重新构建 Docker 容器：docker-compose build"
+        )
+
     global _async_client
     if _async_client is None or _async_client.is_closed:
         # 配置连接池和超时
