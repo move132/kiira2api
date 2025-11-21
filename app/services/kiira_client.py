@@ -5,9 +5,8 @@ import uuid
 import time
 import re
 from difflib import SequenceMatcher
-import requests
 from pathlib import Path
-from typing import Optional, Dict, Any, Iterator, List
+from typing import Optional, Dict, Any, AsyncIterator, List
 from dataclasses import dataclass, field
 
 from app.config import (
@@ -16,7 +15,7 @@ from app.config import (
     BASE_URL_SEAART_UPLOADER,
     DEFAULT_AGENT_NAME
 )
-from app.utils.http_client import build_headers, make_request, get_session
+from app.utils.http_client import build_headers, make_async_request, get_async_client
 from app.utils.file_utils import (
     get_image_data_and_type,
     get_file_extension_from_content_type
@@ -178,7 +177,7 @@ class KiiraAIClient:
         if not self.device_id:
             self.device_id = str(uuid.uuid4())
     
-    def login_guest(self) -> Optional[str]:
+    async def login_guest(self) -> Optional[str]:
         """游客登录，获取 token"""
         url = f'{BASE_URL_SEAART_API}/api/v1/login-guest'
         headers = build_headers(
@@ -187,8 +186,8 @@ class KiiraAIClient:
             referer=f'{BASE_URL_KIIRA}/',
             sec_fetch_site='cross-site'
         )
-        
-        response_data = make_request('POST', url, device_id=self.device_id, headers=headers, json_data={})
+
+        response_data = await make_async_request('POST', url, device_id=self.device_id, headers=headers, json_data={})
         if response_data and 'data' in response_data and 'token' in response_data['data']:
             self.token = response_data['data']['token']
             logger.info(f"获取到游客Token: {self.token[:20]}...")
@@ -197,19 +196,19 @@ class KiiraAIClient:
             logger.error("登录失败：未获取到token")
             return None
     
-    def get_my_info(self) -> Optional[tuple[Dict[str, Any], str]]:
+    async def get_my_info(self) -> Optional[tuple[Dict[str, Any], str]]:
         """获取当前用户信息"""
         url = f'{BASE_URL_KIIRA}/api/v1/my'
         headers = build_headers(device_id=self.device_id, token=self.token, referer=f'{BASE_URL_KIIRA}/chat')
-        
-        response_data = make_request('POST', url, device_id=self.device_id, token=self.token, headers=headers, json_data={})
+
+        response_data = await make_async_request('POST', url, device_id=self.device_id, token=self.token, headers=headers, json_data={})
         if response_data and 'data' in response_data:
             name = response_data.get('data', {}).get('name', '')
             logger.info(f"当前用户信息：{name}")
             return response_data, name
         return None, None
     
-    def get_my_chat_group_list(self, agent_name: str = DEFAULT_AGENT_NAME) -> Optional[tuple[str, str]]:
+    async def get_my_chat_group_list(self, agent_name: str = DEFAULT_AGENT_NAME) -> Optional[tuple[str, str]]:
         """
         获取当前账户的聊天群组列表，查找指定Agent的群组
 
@@ -227,7 +226,7 @@ class KiiraAIClient:
         url = f'{BASE_URL_KIIRA}/api/v1/my-chat-group-list'
         headers = build_headers(device_id=self.device_id, token=self.token, accept_language='eh')
         data = {"page": 1, "page_size": 999}
-        response_data = make_request(
+        response_data = await make_async_request(
             'POST', url,
             device_id=self.device_id,
             token=self.token,
@@ -302,7 +301,7 @@ class KiiraAIClient:
             f"正在尝试从agent列表中查找并创建新群组"
         )
 
-        agent_list = self.get_agent_list()
+        agent_list = await self.get_agent_list()
         if not agent_list or not isinstance(agent_list, list):
             logger.error("获取agent列表失败，无法创建群组")
             return None
@@ -333,7 +332,7 @@ class KiiraAIClient:
                     f"similarity={best_agent_score:.2f}"
                 )
 
-                group_info = self.create_chat_group([account_no_base], label)
+                group_info = await self.create_chat_group([account_no_base], label)
                 if group_info:
                     group_id = group_info.get("id")
                     user_list = group_info.get("user_list") or []
@@ -363,7 +362,7 @@ class KiiraAIClient:
         )
         return None
     
-    def get_agent_list(
+    async def get_agent_list(
         self,
         category_ids: Optional[list[str]] = None,
         keyword: str = ""
@@ -415,7 +414,7 @@ class KiiraAIClient:
             "keyword": keyword
         }
 
-        response_data = make_request(
+        response_data = await make_async_request(
             'POST',
             url,
             device_id=self.device_id,
@@ -447,7 +446,7 @@ class KiiraAIClient:
         logger.error(f"获取 agent 列表失败，响应: {response_data}")
         return None
 
-    def create_chat_group(self, agent_account_nos: list[str], label: str) -> Optional[Dict[str, Any]]:
+    async def create_chat_group(self, agent_account_nos: list[str], label: str) -> Optional[Dict[str, Any]]:
         """
         创建新的聊天群组
 
@@ -469,7 +468,7 @@ class KiiraAIClient:
             "agent_account_nos": agent_account_nos
         }
 
-        response_data = make_request(
+        response_data = await make_async_request(
             'POST',
             url,
             device_id=self.device_id,
@@ -483,7 +482,7 @@ class KiiraAIClient:
         logger.error(f"添加聊天群组{label}失败，响应: {response_data}")
         return None
 
-    def _get_upload_presign(
+    async def _get_upload_presign(
         self,
         resource_id: str,
         file_name: str,
@@ -500,7 +499,7 @@ class KiiraAIClient:
             accept_language='zh',
             sec_fetch_site='cross-site'
         )
-        
+
         data = {
             "id": resource_id,
             "category": category,
@@ -510,10 +509,10 @@ class KiiraAIClient:
             "name": file_name,
             "size": file_size
         }
-        
-        return make_request('POST', url, device_id=self.device_id, token=self.token, headers=headers, json_data=data)
-    
-    def _upload_complete(self, resource_id: str) -> Optional[Dict[str, Any]]:
+
+        return await make_async_request('POST', url, device_id=self.device_id, token=self.token, headers=headers, json_data=data)
+
+    async def _upload_complete(self, resource_id: str) -> Optional[Dict[str, Any]]:
         """通知 seaart.dev 上传已完成（内部方法）"""
         url = f"{BASE_URL_SEAART_UPLOADER}/api/upload/complete"
         headers = build_headers(
@@ -523,18 +522,18 @@ class KiiraAIClient:
             accept_language='zh',
             sec_fetch_site='cross-site'
         )
-        
-        data = {"id": resource_id}
-        return make_request('POST', url, device_id=self.device_id, token=self.token, headers=headers, json_data=data)
 
-    def upload_resource(self, image_path: str) -> Optional[Dict[str, Any]]:
+        data = {"id": resource_id}
+        return await make_async_request('POST', url, device_id=self.device_id, token=self.token, headers=headers, json_data=data)
+
+    async def upload_resource(self, image_path: str) -> Optional[Dict[str, Any]]:
         """
         上传文件资源，自动处理预签名、上传和完成步骤。
         支持本地文件、URL 及 base64 字符串。
-        
+
         Args:
             image_path: 本地文件路径、图片 URL 或 base64 字符串。
-            
+
         Returns:
             包含 'name', 'size', 'url', 'path' 的字典，失败返回 None。
         """
@@ -545,7 +544,7 @@ class KiiraAIClient:
         if not put_data or not content_type:
             logger.error("无法获取图片数据和类型，上传失败")
             return None
-        
+
         file_size = len(put_data)
         # 根据实际 content_type 调整 file_name 扩展名
         base_name = Path(initial_file_name).stem
@@ -554,7 +553,7 @@ class KiiraAIClient:
 
         # 2. 请求预签名 URL
         logger.debug(f"Step 1: 正在请求预签名 URL (Size: {file_size} bytes, Type: {content_type})...")
-        presign_response = self._get_upload_presign(
+        presign_response = await self._get_upload_presign(
             resource_id=resource_id,
             file_name=file_name,
             file_size=file_size,
@@ -578,25 +577,25 @@ class KiiraAIClient:
 
         # 3. 直传图片到 GCS
         logger.debug("Step 2: 正在直传图片到 GCS...")
-        
+
         # 检查预签名响应中是否有指定的 headers
         presign_headers = {}
         if pre_signs and isinstance(pre_signs, list) and len(pre_signs) > 0 and "headers" in pre_signs[0]:
             presign_headers.update(pre_signs[0]["headers"])
-            
+
         # 实际上传 headers - 使用最少的必要 headers，避免干扰 GCS 签名验证
         upload_headers = {
             "Content-Type": content_type,
             "Content-Length": str(file_size),
         }
         upload_headers.update(presign_headers)  # 合并预签名指定的 headers
-        
+
         try:
-            session = get_session()
-            put_resp = session.put(
+            client = await get_async_client()
+            put_resp = await client.put(
                 upload_url,
                 headers=upload_headers,
-                data=put_data,
+                content=put_data,
                 timeout=60
             )
             if put_resp.status_code == 200:
@@ -610,7 +609,7 @@ class KiiraAIClient:
 
         # 4. 调用 complete 接口获取最终图片地址
         logger.debug(f"Step 3: 正在调用 complete 接口获取最终图片地址...")
-        complete_data = self._upload_complete(resource_ret_id)
+        complete_data = await self._upload_complete(resource_ret_id)
 
         if complete_data and complete_data.get("status", {}).get("code") == 10000:
             image_data = complete_data.get("data", {})
@@ -626,7 +625,7 @@ class KiiraAIClient:
             
         return None
 
-    def send_message(
+    async def send_message(
         self,
         message: str,
         at_account_no: str = 'seagen_sora2_agent',
@@ -639,17 +638,17 @@ class KiiraAIClient:
         if not self.group_id:
             logger.error("未设置群组ID，请先调用 get_my_chat_group_list()")
             return None
-        
+
         url = f'{BASE_URL_KIIRA}/api/v1/send-message'
         headers = build_headers(device_id=self.device_id, token=self.token, accept_language='zh')
-        
+
         if resources is None:
             resources = []
-        
+
         if message_id is None:
             # 使用 uuid1().int 的前17位作为消息ID
             message_id = str(uuid.uuid1().int)[:17]
-        
+
         data = {
             "id": message_id,
             "at_account_no": at_account_no,
@@ -660,22 +659,24 @@ class KiiraAIClient:
             "agent_type": agent_type
         }
         logger.info(f"发送消息: {data}")
-        response_data = make_request('POST', url, device_id=self.device_id, token=self.token, headers=headers, json_data=data)
+        response_data = await make_async_request('POST', url, device_id=self.device_id, token=self.token, headers=headers, json_data=data)
         if response_data and 'data' in response_data:
             task_id = response_data['data'].get('task_id')
             if task_id:
                 logger.info(f"消息发送成功，task_id: {task_id}")
                 return task_id
-        
+
         logger.error("发送消息失败：未获取到task_id")
         return None
     
-    def stream_chat_completions(
+    async def stream_chat_completions(
         self,
         task_id: str,
         timeout: int = 180
-    ) -> Iterator[str]:
+    ) -> AsyncIterator[str]:
         """实时流式获取AI聊天响应"""
+        from app.utils.http_client import stream_async_request
+
         url = f'{BASE_URL_KIIRA}/api/v1/stream/chat/completions'
         headers = build_headers(
             device_id=self.device_id,
@@ -683,55 +684,41 @@ class KiiraAIClient:
             accept='text/event-stream',
             accept_language='zh'
         )
-        
+
         data = {"message_id": task_id}
-        
+
         try:
             logger.info(f"开始请求流式响应，task_id: {task_id}")
-            session = get_session()
-            response = session.post(
-                url,
-                headers=headers,
-                json=data,
-                cookies={},
-                stream=True,
-                timeout=timeout
-            )
-            
-            logger.debug(f"收到响应，状态码: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"流式响应状态码错误: {response.status_code}")
-                logger.error(f"响应内容: {response.text[:500]}")
-                return
-
-            response.encoding = 'utf-8'
-            logger.debug("开始接收流式数据...")
+            logger.debug("开始接收异步流式数据...")
 
             line_count = 0
             has_data = False
-            for line in response.iter_lines(decode_unicode=True):
+
+            async for line in stream_async_request(
+                method='POST',
+                url=url,
+                device_id=self.device_id,
+                token=self.token,
+                headers=headers,
+                json_data=data,
+                timeout=timeout
+            ):
                 line_count += 1
                 if line:
                     has_data = True
                     if line_count == 1:
                         logger.debug("✅ 收到第一行数据")
-                    
-                    if isinstance(line, bytes):
-                        line = line.decode('utf-8')
-                    
+
                     # 跳过注释行和空行
                     if not line.startswith(":"):
                         yield line
                 elif line_count == 1:
                     logger.warning("⚠ 第一行是空行，继续等待...")
 
-
             if not has_data:
                 logger.warning("⚠ 警告：没有收到任何数据")
             else:
-                logger.debug(f"✅ 流式响应接收完成，共处理 {line_count} 行")
-                
-        except requests.exceptions.RequestException as e:
-            logger.error(f"stream_chat_completions 网络错误: {e}")
+                logger.debug(f"✅ 异步流式响应接收完成，共处理 {line_count} 行")
+
         except Exception as e:
             logger.error(f"stream_chat_completions 错误: {e}", exc_info=True)

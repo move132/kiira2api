@@ -5,7 +5,7 @@ import uuid
 import json
 import time
 import os
-from typing import Optional, Dict, Any, List, Iterator
+from typing import Optional, Dict, Any, List, AsyncIterator
 from fastapi import HTTPException
 
 from app.services.kiira_client import KiiraAIClient, is_agent_name_match
@@ -65,32 +65,32 @@ class ChatService:
         # 如果没有token，先登录
         if not self.client.token:
             logger.info("正在获取游客Token...")
-            if not self.client.login_guest():
+            if not await self.client.login_guest():
                 raise HTTPException(status_code=500, detail="无法获取认证token")
             logger.info("✅ Token获取成功")
         # 获取当前用户信息
-        user_info, name = self.client.get_my_info()
+        user_info, name = await self.client.get_my_info()
         if user_info:
             self.client.user_name = name
         # 如果没有群组ID，获取群组列表
         if not self.client.group_id:
             logger.info(f"正在获取聊天群组ID ({agent_name})...")
-            result = self.client.get_my_chat_group_list(agent_name=agent_name)
+            result = await self.client.get_my_chat_group_list(agent_name=agent_name)
             if not result:
                 raise HTTPException(
-                    status_code=404, 
+                    status_code=404,
                     detail=f"无法找到指定的Agent群组: {agent_name}"
                 )
         self.save_account_info()
         self._initialized = True
     
-    def _extract_images_from_messages(self, messages: List[Any]) -> List[Dict[str, Any]]:
+    async def _extract_images_from_messages(self, messages: List[Any]) -> List[Dict[str, Any]]:
         """
         从消息中提取图片资源
-        
+
         Args:
             messages: 消息列表（可以是字典或 Pydantic 模型对象）
-            
+
         Returns:
             资源列表
         """
@@ -103,12 +103,12 @@ class ChatService:
                 content = message.get("content", "")
             else:
                 continue
-                
+
             if isinstance(content, str):
                 # 检查是否包含图片URL
                 if content.startswith(("http://", "https://")):
                     # 尝试上传图片
-                    uploaded = self.client.upload_resource(content)
+                    uploaded = await self.client.upload_resource(content)
                     if uploaded:
                         resources.append({
                             "name": uploaded.get('name'),
@@ -122,7 +122,7 @@ class ChatService:
                     if isinstance(item, dict) and item.get("type") == "image_url":
                         image_url = item.get("image_url", {}).get("url", "")
                         if image_url:
-                            uploaded = self.client.upload_resource(image_url)
+                            uploaded = await self.client.upload_resource(image_url)
                             if uploaded:
                                 resources.append({
                                     "name": uploaded.get('name'),
@@ -216,13 +216,13 @@ class ChatService:
         prompt = self._build_prompt_from_messages(messages)
         if not prompt:
             raise HTTPException(status_code=400, detail="消息内容不能为空")
-        
+
         # 提取图片资源
-        resources = self._extract_images_from_messages(messages)
+        resources = await self._extract_images_from_messages(messages)
 
         # 批量创建配置的agent群组（使用模糊匹配）
         if AGENT_LIST:
-            agent_list = self.client.get_agent_list()
+            agent_list = await self.client.get_agent_list()
             if agent_list and isinstance(agent_list, list):
                 for agent in agent_list:
                     label = agent.get("label", "") or ""
@@ -239,10 +239,10 @@ class ChatService:
                         account_no = agent.get("account_no")
                         if account_no:
                             # create_chat_group 接口期望的是列表
-                            self.client.create_chat_group([account_no], label)
+                            await self.client.create_chat_group([account_no], label)
 
         # 发送消息
-        task_id = self.client.send_message(
+        task_id = await self.client.send_message(
             message=prompt,
             at_account_no=self.client.at_account_no,
             resources=resources if resources else None
@@ -274,7 +274,7 @@ class ChatService:
         media_type = None
         sa_resources: List[Dict[str, Any]] = []
 
-        for line in self.client.stream_chat_completions(task_id):
+        async for line in self.client.stream_chat_completions(task_id):
             # 只处理 SSE data 行，其它行直接跳过
             if not line or not line.startswith("data: "):
                 continue
@@ -388,15 +388,15 @@ class ChatService:
             }
         }
     
-    def stream_chat_completion(self, task_id: str) -> Iterator[str]:
+    async def stream_chat_completion(self, task_id: str) -> AsyncIterator[str]:
         """
         流式返回聊天响应
-        
+
         Args:
             task_id: 任务ID
-            
+
         Yields:
             SSE格式的响应行
         """
-        for line in self.client.stream_chat_completions(task_id):
+        async for line in self.client.stream_chat_completions(task_id):
             yield line

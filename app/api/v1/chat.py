@@ -98,7 +98,7 @@ async def chat_completions(
         # 如果请求流式响应
         if request.stream:
             if msg_group_id and msg_token:
-                resources = chat_service._extract_images_from_messages([last_message]) if last_message else []
+                resources = await chat_service._extract_images_from_messages([last_message]) if last_message else []
                 logger.info(f"复用对话状态 group_id={msg_group_id}, 提取图片资源数量: {len(resources)}")
 
                 # 直接使用已有的group_id和token
@@ -107,11 +107,11 @@ async def chat_completions(
 
                 # 如果有at_account_no缓存则使用,否则查询一次
                 if not chat_service.client.at_account_no:
-                    _, at_account_no = chat_service.client.get_my_chat_group_list(request.model)
+                    _, at_account_no = await chat_service.client.get_my_chat_group_list(request.model)
                 else:
                     at_account_no = chat_service.client.at_account_no
 
-                task_id = chat_service.client.send_message(
+                task_id = await chat_service.client.send_message(
                     message=prompt,
                     at_account_no=at_account_no,
                     resources=resources if resources else None
@@ -168,7 +168,7 @@ async def chat_completions(
                     }
                     yield f"data: {json.dumps(group_id_chunk)}\n\n"
                 try:
-                    for line in chat_service.stream_chat_completion(task_id):
+                    async for line in chat_service.stream_chat_completion(task_id):
                         if not line or not line.strip():
                             continue
                         # print(line)
