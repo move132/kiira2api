@@ -197,7 +197,7 @@ async def chat_completions(
                             
                             try:
                                 data = json.loads(json_str)
-
+                                # logger.info(f"解析数据: {data.get('choices', [])}")
                                 # 优化: 一次解析同时提取媒体URL和content,避免重复JSON解析
                                 parse_result = extract_media_from_data(data)
                                 if parse_result:

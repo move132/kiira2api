@@ -65,7 +65,7 @@ copy .env.example .env
 
 ```env
 # Agent 列表
-AGENT_LIST=["Nano Banana Pro🔥","Nano Banana Video Pro🔥","Sora 2: AI Video Remixer", "Veo 3: AI Video Weaver", "Midjourney Art Studio"]
+AGENT_LIST=["Nano Banana Pro🔥","Nano Banana Pro 🔥👉 Try Free","Sora 2: AI Video Remixer", "Veo 3: AI Video Weaver", "Midjourney Art Studio"]
 ```
 
 4. **运行服务**
@@ -173,6 +173,27 @@ docker-compose up -d --build
 - 支持服务重启策略
 - 更简单的管理命令
 
+### 使用 GitHub Container 镜像
+
+1. **拉取镜像**
+
+```bash
+# 拉取最新版本
+docker pull ghcr.io/move132/kiira2api:latest
+
+# 拉取特定版本
+docker pull ghcr.io/move132/kiira2api:v1.0.0
+```
+
+2. **运行容器**
+
+```bash
+# 使用 GHCR 镜像运行
+docker run -d -p 8999:8999 \
+  -v $(pwd)/data:/app/data \
+  --name kiira2api \
+  ghcr.io/move132/kiira2api:latest
+```
 ## ⚙️ 配置说明
 
 ### 环境变量
