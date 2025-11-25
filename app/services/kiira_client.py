@@ -661,7 +661,22 @@ class KiiraAIClient:
         logger.info(f"发送消息: {data}")
         response_data = await make_async_request('POST', url, device_id=self.device_id, token=self.token, headers=headers, json_data=data)
         if response_data and 'data' in response_data:
-            task_id = response_data['data'].get('task_id')
+            data_field = response_data['data']
+            # 处理 data 字段可能是列表或字典的情况
+            if isinstance(data_field, list):
+                # 如果是列表，取第一个元素
+                if data_field and isinstance(data_field[0], dict):
+                    task_id = data_field[0].get('task_id')
+                else:
+                    logger.error(f"发送消息失败：data 字段为空列表或格式错误: {data_field}")
+                    return None
+            elif isinstance(data_field, dict):
+                # 如果是字典，直接获取
+                task_id = data_field.get('task_id')
+            else:
+                logger.error(f"发送消息失败：data 字段类型错误: {type(data_field)}")
+                return None
+
             if task_id:
                 logger.info(f"消息发送成功，task_id: {task_id}")
                 return task_id
