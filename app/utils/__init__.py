@@ -6,7 +6,8 @@ from .file_utils import (
     guess_content_type,
     get_file_extension_from_content_type,
     decode_base64_img,
-    get_image_data_and_type
+    get_image_data_and_type,
+    get_image_data_and_type_async
 )
 from .stream_parser import parse_stream_response
 from .logger import get_logger, setup_logger, configure_root_logger
@@ -18,6 +19,7 @@ __all__ = [
     'get_file_extension_from_content_type',
     'decode_base64_img',
     'get_image_data_and_type',
+    'get_image_data_and_type_async',
     'parse_stream_response',
     'get_logger',
     'setup_logger',

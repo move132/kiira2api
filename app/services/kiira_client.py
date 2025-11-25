@@ -17,7 +17,7 @@ from app.config import (
 )
 from app.utils.http_client import build_headers, make_async_request, get_async_client
 from app.utils.file_utils import (
-    get_image_data_and_type,
+    get_image_data_and_type_async,
     get_file_extension_from_content_type
 )
 from app.utils.logger import get_logger
@@ -537,9 +537,9 @@ class KiiraAIClient:
         Returns:
             包含 'name', 'size', 'url', 'path' 的字典，失败返回 None。
         """
-        # 1. 解析文件数据和类型
+        # 1. 解析文件数据和类型（使用异步版本，避免阻塞事件循环）
         initial_file_name = Path(image_path).name if not (image_path.startswith("http") or image_path.startswith("data:")) else "upload.jpg"
-        put_data, content_type = get_image_data_and_type(image_path, initial_file_name)
+        put_data, content_type = await get_image_data_and_type_async(image_path, initial_file_name)
 
         if not put_data or not content_type:
             logger.error("无法获取图片数据和类型，上传失败")
