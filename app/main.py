@@ -1,6 +1,7 @@
 """
 FastAPI 应用主入口
 """
+import asyncio
 import uvicorn
 import json
 import logging
@@ -41,15 +42,69 @@ Kiira2API - 基于Kiira AI的逆向API服务
 当前环境变量信息
 {json.dumps(settings, ensure_ascii=False, indent=2)}
 """
+async def cleanup_expired_sessions_periodically():
+    """
+    定期清理过期会话的后台任务
+
+    优化说明：
+    - 每小时清理一次过期会话，防止内存无限增长
+    - 在高 QPS 场景下，内存占用从线性增长变为有上界
+    - 清理操作使用异步锁，不影响正常请求处理
+    """
+    from app.services.conversation_store import get_conversation_store
+
+    store = get_conversation_store()
+    while True:
+        try:
+            # 每小时清理一次
+            await asyncio.sleep(3600)
+            cleaned_count = await store.cleanup_expired()
+            if cleaned_count > 0:
+                logger.info(f"🧹 已清理 {cleaned_count} 个过期会话")
+        except asyncio.CancelledError:
+            logger.info("🛑 会话清理任务已停止")
+            break
+        except Exception as e:
+            logger.error(f"❌ 清理过期会话失败: {e}", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
+    """
+    应用生命周期管理
+
+    优化说明：
+    - 启动时创建后台清理任务
+    - 关闭时优雅停止清理任务
+    - 确保资源正确释放
+    """
     # 启动时执行
     print(f"{GREEN}{'=' * 50}{RESET}")
     print(f"{GREEN}🚀Kiira2API 启动成功{RESET}")
     print(project_logo_str)
     print(f"{GREEN}{'=' * 50}{RESET}")
+
+    # 启动后台清理任务
+    cleanup_task = asyncio.create_task(cleanup_expired_sessions_periodically())
+    logger.info("✅ 会话清理任务已启动")
+
     yield
+
+    # 关闭时执行
+    logger.info("🛑 正在关闭应用...")
+
+    # 停止清理任务
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+    # 关闭异步HTTP客户端
+    from app.utils.http_client import close_async_client
+    await close_async_client()
+    logger.info("✅ 异步HTTP客户端已关闭")
+    logger.info("✅ 应用关闭完成")
 
 app = FastAPI(title="Kiira2API", version="1.0.0", lifespan=lifespan)
 
